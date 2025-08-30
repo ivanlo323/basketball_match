@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>籃球比賽記錄</title>
+    <style>
+        table {
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        th, td {
+            border: 1px solid black;
+            padding: 5px;
+            text-align: center;
+        }
+        .blue {
+            background-color: lightblue;
+        }
+        .red {
+            background-color: lightcoral;
+        }
+        .locked {
+            pointer-events: none;
+        }
+        button.winButton {
+            font-size: 1.2em;
+            padding: 10px;
+            margin: 5px;
+        }
+        button.winButton[data-team="blue"] {
+            background-color: lightblue;
+        }
+        button.winButton[data-team="red"] {
+            background-color: lightcoral;
+        }
+        #gameControls {
+            margin-top: 20px;
+        }
+        button.aceButton {
+            font-size: 0.9em;
+            padding: 5px;
+        }
+        button.aceButton.active {
+            background-color: lightgreen;
+        }
+    </style>
+</head>
+<body>
+    <h1>籃球比賽記錄</h1>
+    
+    <div id="playerSetup">
+        人數: 
+        <button id="minus">-</button>
+        <span id="playerCount">6</span>
+        <button id="plus">+</button>
+        <button id="confirmPlayers">確定人數</button>
+    </div>
+    
+    <div style="margin-bottom: 20px;">
+        場錢: <input id="courtFee" type="number" value="0">
+    </div>
+    
+    <table id="scoreTable">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>王牌</th>
+                <th>總劃數</th>
+                <th>支付場錢</th>
+            </tr>
+        </thead>
+        <tbody id="playerRows">
+            <!-- 初始空白行 -->
+        </tbody>
+    </table>
+    
+    <div id="gameControls" style="display: none;">
+        <button id="newGame">新一場</button>
+        <button id="assignTeams" disabled>分隊</button>
+        <button id="undo" disabled>還原</button>
+        <button id="redo" disabled>取消還原</button>
+        <div>
+            <button class="winButton" data-team="blue" data-multiplier="1" disabled>藍隊勝</button>
+            <button class="winButton" data-team="blue" data-multiplier="2" disabled>藍隊勝(雙炒)</button>
+            <button class="winButton" data-team="blue" data-multiplier="3" disabled>藍隊勝(三炒)</button>
+            <button class="winButton" data-team="red" data-multiplier="1" disabled>紅隊勝</button>
+            <button class="winButton" data-team="red" data-multiplier="2" disabled>紅隊勝(雙炒)</button>
+            <button class="winButton" data-team="red" data-multiplier="3" disabled>紅隊勝(三炒)</button>
+        </div>
+    </div>
+
+    <script>
+        let playerCount = 6;
+        let players = [];
+        let games = []; // 每場: {teams: {blue: [], red: []}, scores: new Array(playerCount).fill(0), columnIndex: num, acesUsed: []}
+        let usedCombinations = new Set();
+        let confirmed = false;
+        let currentGame = -1;
+        let totalFee = 0;
+        let lastAction = null; // {gameIndex: num, winner: 'blue/red', multiplier: num, acesUsed: []}
+        let undoneAction = null;
+
+        const playerCountSpan = document.getElementById('playerCount');
+        const confirmPlayers = document.getElementById('confirmPlayers');
+        const minus = document.getElementById('minus');
+        const plus = document.getElementById('plus');
+        const scoreTable = document.getElementById('scoreTable');
+        const playerRows = document.getElementById('playerRows');
+        const newGame = document.getElementById('newGame');
+        const assignTeams = document.getElementById('assignTeams');
+        const undoBtn = document.getElementById('undo');
+        const redoBtn = document.getElementById('redo');
+        const gameControls = document.getElementById('gameControls');
+        const courtFee = document.getElementById('courtFee');
+        const winButtons = document.querySelectorAll('.winButton');
+
+        // 更新人數顯示
+        function updatePlayerCount() {
+            playerCountSpan.textContent = playerCount;
+        }
+
+        // 加減人數
+        minus.addEventListener('click', () => {
+            if (playerCount > 6) playerCount--;
+            updatePlayerCount();
+        });
+
+        plus.addEventListener('click', () => {
+            if (playerCount < 10) playerCount++;
+            updatePlayerCount();
+        });
+
+        // 確定人數
+        confirmPlayers.addEventListener('click', () => {
+            if (confirmed) return;
+            confirmed = true;
+            document.getElementById('playerSetup').classList.add('locked');
+            gameControls.style.display = 'block';
+
+            // 創建玩家行
+            playerRows.innerHTML = '';
+            for (let i = 0; i < playerCount; i++) {
+                const row = document.createElement('tr');
+                const nameCell = document.createElement('td');
+                const nameInput = document.createElement('input');
+                nameInput.type = 'text';
+                nameCell.appendChild(nameInput);
+                row.appendChild(nameCell);
+
+                // 王牌
+                const aceCell = document.createElement('td');
+                const aceButton = document.createElement('button');
+                aceButton.classList.add('aceButton');
+                aceButton.textContent = '王牌';
+                aceButton.disabled = true;
+                aceCell.appendChild(aceButton);
+                row.appendChild(aceCell);
+
+                // 總劃數
+                const totalScoreCell = document.createElement('td');
+                totalScoreCell.textContent = '0';
+                row.appendChild(totalScoreCell);
+
+                // 支付場錢
+                const payCell = document.createElement('td');
+                payCell.textContent = '0';
+                row.appendChild(payCell);
+
+                playerRows.appendChild(row);
+                players.push({
+                    name: '',
+                    row,
+                    nameInput,
+                    aceButton,
+                    totalScoreCell,
+                    payCell,
+                    total: 0,
+                    aceUsed: false,
+                    aceGame: null
+                });
+            }
+
+            // 解鎖名字輸入
+            players.forEach(p => p.nameInput.disabled = false);
+        });
+
+        // 新一場
+        newGame.addEventListener('click', () => {
+            if (newGame.disabled) return;
+            currentGame++;
+            if (currentGame === 0) {
+                // 第一場，鎖定名字
+                players.forEach((p, i) => {
+                    p.name = p.nameInput.value.trim() || `玩家${i+1}`;
+                    p.nameInput.parentNode.textContent = p.name;
+                });
+            }
+
+            // 添加新欄到 thead 和每行
+            const headRow = scoreTable.querySelector('thead tr');
+            const gameTh = document.createElement('th');
+            gameTh.textContent = `第${currentGame + 1}場`;
+            headRow.insertBefore(gameTh, headRow.children[headRow.children.length - 2]);
+
+            players.forEach(p => {
+                const gameTd = document.createElement('td');
+                gameTd.textContent = '0';
+                p.row.insertBefore(gameTd, p.totalScoreCell);
+            });
+
+            // 新遊戲數據
+            games.push({
+                teams: {blue: [], red: []},
+                scores: new Array(playerCount).fill(0),
+                columnIndex: currentGame + 2, // +2 for Name and Ace
+                acesUsed: []
+            });
+
+            // 解鎖分隊
+            assignTeams.disabled = false;
+
+            // 鎖定新一場直到有結果
+            newGame.disabled = true;
+
+            // 鎖定王牌按鈕
+            players.forEach(p => p.aceButton.disabled = true);
+
+            // 鎖定還原按鈕
+            undoBtn.disabled = true;
+            redoBtn.disabled = true;
+            lastAction = null;
+            undoneAction = null;
+
+            // 鎖定之前場次的顏色
+            if (currentGame > 0) {
+                const prevGame = games[currentGame - 1];
+                players.forEach((p, i) => {
+                    const prevCell = p.row.children[prevGame.columnIndex];
+                    prevCell.classList.add('locked');
+                });
+            }
+
+            // 更新總計
+            updateTotals();
+        });
+
+        // 分隊
+        assignTeams.addEventListener('click', () => {
+            if (assignTeams.disabled) return;
+            assignTeams.disabled = true;
+
+            let combination;
+            let attempts = 0;
+            const maxAttempts = 10000;
+
+            do {
+                const indices = Array.from({length: playerCount}, (_, i) => i);
+                indices.sort(() => Math.random() - 0.5);
+                const half = Math.floor(playerCount / 2);
+                const blue = indices.slice(0, half).sort();
+                const red = indices.slice(half).sort();
+                combination = JSON.stringify([blue, red]);
+
+                attempts++;
+                if (attempts > maxAttempts) {
+                    usedCombinations.clear();
+                    attempts = 0;
+                }
+            } while (usedCombinations.has(combination));
+
+            usedCombinations.add(combination);
+
+            const blueIndices = JSON.parse(combination)[0];
+            const redIndices = JSON.parse(combination)[1];
+
+            const current = games[currentGame];
+            current.teams.blue = blueIndices;
+            current.teams.red = redIndices;
+
+            // 更新顏色，只更新nameCell和gameCell
+            players.forEach((p, i) => {
+                const nameCell = p.row.children[0];
+                const gameCell = p.row.children[current.columnIndex];
+                if (blueIndices.includes(i)) {
+                    nameCell.classList.add('blue');
+                    nameCell.classList.remove('red');
+                    gameCell.classList.add('blue');
+                    gameCell.classList.remove('red');
+                } else {
+                    nameCell.classList.add('red');
+                    nameCell.classList.remove('blue');
+                    gameCell.classList.add('red');
+                    gameCell.classList.remove('blue');
+                }
+                // 確保總劃數不轉色
+                p.totalScoreCell.classList.remove('blue', 'red');
+            });
+
+            // 解鎖勝按鈕和王牌按鈕（如果未使用）
+            winButtons.forEach(btn => btn.disabled = false);
+            players.forEach((p, i) => {
+                if (!p.aceUsed) {
+                    p.aceButton.disabled = false;
+                    p.aceButton.textContent = '王牌';
+                    p.aceButton.classList.remove('active');
+                    p.aceButton.onclick = () => {
+                        if (p.aceButton.textContent === '王牌') {
+                            p.aceButton.textContent = '使用';
+                            p.aceButton.classList.add('active');
+                        } else {
+                            p.aceButton.textContent = '王牌';
+                            p.aceButton.classList.remove('active');
+                        }
+                    };
+                }
+            });
+        });
+
+        // 勝出按鈕
+        winButtons.forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (btn.disabled) return;
+                const winner = btn.dataset.team;
+                const multiplier = parseInt(btn.dataset.multiplier);
+                const current = games[currentGame];
+                if (!current.teams.blue.length) return;
+
+                // 計算王牌
+                const acesUsed = [];
+                let aceCount = 0;
+                players.forEach((p, i) => {
+                    if (p.aceButton.textContent === '使用' && !p.aceUsed) {
+                        const isWinner = (winner === 'blue' && current.teams.blue.includes(i)) ||
+                                        (winner === 'red' && current.teams.red.includes(i));
+                        if (isWinner) {
+                            aceCount++;
+                        }
+                        acesUsed.push(i);
+                        p.aceUsed = true;
+                        p.aceGame = currentGame + 1;
+                        p.aceButton.textContent = `第${p.aceGame}場`;
+                        p.aceButton.classList.remove('active');
+                        p.aceButton.disabled = true;
+                    }
+                });
+
+                // 儲存動作 for undo
+                lastAction = {gameIndex: currentGame, winner, multiplier, acesUsed};
+                undoneAction = null;
+                redoBtn.disabled = true;
+
+                const losers = winner === 'blue' ? current.teams.red : current.teams.blue;
+
+                losers.forEach(i => {
+                    current.scores[i] += multiplier * (1 + aceCount);
+                    const cell = players[i].row.children[current.columnIndex];
+                    cell.textContent = current.scores[i];
+                });
+
+                updateTotals();
+
+                // 鎖定勝按鈕、王牌按鈕，解鎖新一場
+                winButtons.forEach(b => b.disabled = true);
+                players.forEach(p => p.aceButton.disabled = true);
+                newGame.disabled = false;
+
+                // 解鎖還原
+                undoBtn.disabled = false;
+            });
+        });
+
+        // 更新總計
+        function updateTotals() {
+            let grandTotal = 0;
+            players.forEach((p, i) => {
+                p.total = games.reduce((sum, g) => sum + g.scores[i], 0);
+                p.totalScoreCell.textContent = p.total;
+                grandTotal += p.total;
+            });
+
+            totalFee = parseFloat(courtFee.value) || 0;
+            let totalPay = 0;
+            if (grandTotal > 0 && totalFee > 0) {
+                players.forEach(p => {
+                    const pay = Math.ceil((p.total / grandTotal) * totalFee);
+                    p.payCell.textContent = pay;
+                    totalPay += pay;
+                });
+            } else {
+                players.forEach(p => {
+                    p.payCell.textContent = '0';
+                });
+            }
+
+            updateTotalRowPosition(grandTotal, totalPay);
+        }
+
+        function updateTotalRowPosition(grandTotal = 0, totalPay = 0) {
+            let totalRow = playerRows.querySelector('.totalRow');
+            if (!totalRow) {
+                totalRow = document.createElement('tr');
+                totalRow.classList.add('totalRow');
+                playerRows.appendChild(totalRow);
+            }
+
+            // 清空總行
+            totalRow.innerHTML = '';
+
+            // Name 下 '總數'
+            const labelTd = document.createElement('td');
+            labelTd.textContent = '總數';
+            totalRow.appendChild(labelTd);
+
+            // 王牌空
+            totalRow.appendChild(document.createElement('td'));
+
+            // 空 td for each game column
+            for (let j = 0; j < games.length; j++) {
+                const emptyTd = document.createElement('td');
+                totalRow.appendChild(emptyTd);
+            }
+
+            // 總劃數 td
+            const totalTd = document.createElement('td');
+            totalTd.textContent = grandTotal;
+            totalRow.appendChild(totalTd);
+
+            // 支付總數
+            const payTotalTd = document.createElement('td');
+            payTotalTd.textContent = totalPay;
+            totalRow.appendChild(payTotalTd);
+        }
+
+        // 場錢變化
+        courtFee.addEventListener('input', updateTotals);
+
+        // 還原 (undo last win)，只限最後一場
+        undoBtn.addEventListener('click', () => {
+            if (undoBtn.disabled || !lastAction || lastAction.gameIndex !== currentGame) return;
+            const {gameIndex, winner, multiplier, acesUsed} = lastAction;
+            const g = games[gameIndex];
+            const losers = winner === 'blue' ? g.teams.red : g.teams.blue;
+
+            // 還原分數
+            let aceCount = 0;
+            players.forEach((p, i) => {
+                if (acesUsed.includes(i)) {
+                    const isWinner = (winner === 'blue' && g.teams.blue.includes(i)) ||
+                                    (winner === 'red' && g.teams.red.includes(i));
+                    if (isWinner) {
+                        aceCount++;
+                    }
+                    p.aceUsed = false;
+                    p.aceGame = null;
+                    p.aceButton.textContent = '王牌';
+                    p.aceButton.classList.remove('active');
+                    p.aceButton.disabled = false;
+                }
+            });
+            losers.forEach(i => {
+                g.scores[i] -= (multiplier * (1 + aceCount));
+                const cell = players[i].row.children[g.columnIndex];
+                cell.textContent = g.scores[i];
+            });
+
+            // 清空當場王牌記錄
+            g.acesUsed = [];
+
+            // 解鎖所有未使用的王牌按鈕
+            players.forEach(p => {
+                if (!p.aceUsed) {
+                    p.aceButton.disabled = false;
+                }
+            });
+
+            updateTotals();
+            undoneAction = lastAction;
+            lastAction = null;
+            redoBtn.disabled = false;
+            undoBtn.disabled = true;
+            // 恢復到無結果狀態，鎖定新一場，解鎖勝
+            newGame.disabled = true;
+            winButtons.forEach(b => b.disabled = false);
+        });
+
+        // 取消還原 (redo)
+        redoBtn.addEventListener('click', () => {
+            if (redoBtn.disabled || !undoneAction) return;
+            const {gameIndex, winner, multiplier, acesUsed} = undoneAction;
+            const g = games[gameIndex];
+            const losers = winner === 'blue' ? g.teams.red : g.teams.blue;
+
+            // 重新應用分數
+            let aceCount = 0;
+            players.forEach((p, i) => {
+                if (acesUsed.includes(i)) {
+                    const isWinner = (winner === 'blue' && g.teams.blue.includes(i)) ||
+                                    (winner === 'red' && g.teams.red.includes(i));
+                    if (isWinner) {
+                        aceCount++;
+                    }
+                    p.aceUsed = true;
+                    p.aceGame = gameIndex + 1;
+                    p.aceButton.textContent = `第${p.aceGame}場`;
+                    p.aceButton.classList.remove('active');
+                    p.aceButton.disabled = true;
+                    g.acesUsed.push(i);
+                }
+            });
+            losers.forEach(i => {
+                g.scores[i] += (multiplier * (1 + aceCount));
+                const cell = players[i].row.children[g.columnIndex];
+                cell.textContent = g.scores[i];
+            });
+
+            // 鎖定所有王牌按鈕
+            players.forEach(p => p.aceButton.disabled = true);
+
+            updateTotals();
+            lastAction = undoneAction;
+            undoneAction = null;
+            redoBtn.disabled = true;
+            undoBtn.disabled = false;
+            // 恢復到有結果，解鎖新一場，鎖定勝
+            newGame.disabled = false;
+            winButtons.forEach(b => b.disabled = true);
+        });
+    </script>
+</body>
+</html>
